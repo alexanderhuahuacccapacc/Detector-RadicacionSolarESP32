@@ -46,6 +46,9 @@
   .lista-wifi button { padding: .25rem .6rem }
   .vacio { margin: 0; color: #c1d1c7 }
   #aviso-llena { color: #ffd98a }
+  #ayuda-puerto { margin-top: 1rem; color: #c1d1c7; font-size: .95rem }
+  #ayuda-puerto summary { cursor: pointer; color: #ccf078 }
+  #ayuda-puerto a { color: #ccf078 }
   [hidden] { display: none !important }
 </style>
 </head>
@@ -102,8 +105,24 @@
     <p id="estado-wifi" role="status"></p>
     <div class="acciones">
       <button type="button" id="conectar-wifi">Conectar por USB</button>
+      <button type="button" class="secundario" id="conectar-todos" title="Muestra todos los puertos serie, no solo los de ESP32">Mostrar todos los puertos</button>
       <button type="button" class="secundario" id="cerrar-wifi">Cerrar</button>
     </div>
+
+    <details id="ayuda-puerto">
+      <summary>¿No aparece el puerto del ESP32?</summary>
+      <ul>
+        <li>Usa Chrome o Edge de escritorio. No funciona en celular, Firefox ni Safari.</li>
+        <li>Usa un cable USB de datos; muchos cables solo cargan.</li>
+        <li>En Windows abre el Administrador de dispositivos y revisa «Puertos (COM y LPT)». Debe verse
+          «Silicon Labs CP210x» o «USB-SERIAL CH340». Si aparece como dispositivo desconocido o con una
+          señal amarilla, instala el controlador:
+          <a href="https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers" target="_blank" rel="noopener noreferrer">CP210x</a> o
+          <a href="https://www.wch-ic.com/downloads/CH341SER_EXE.html" target="_blank" rel="noopener noreferrer">CH340</a>.
+          Luego desconecta y vuelve a conectar la placa.</li>
+        <li>Cierra el Monitor serie de Arduino IDE y cualquier otro programa que use el puerto.</li>
+      </ul>
+    </details>
 
     <section id="zona-wifi" hidden aria-labelledby="titulo-guardadas">
       <h3 id="titulo-guardadas">Redes guardadas en el ESP32 <span id="contador-wifi"></span></h3>
@@ -425,6 +444,21 @@ let actual = '';      // red a la que está conectado ahora
 let cercanas = [];    // [{ ssid, rssi, abierta }]
 let seleccion = null; // red cercana elegida, para saber si es abierta
 
+// Chips USB-serie que llevan las placas ESP32. El selector solo muestra estos puertos;
+// «Mostrar todos los puertos» quita el filtro por si la placa usa otro chip.
+const filtrosEsp32 = [
+  { usbVendorId: 0x10C4, usbProductId: 0xEA60 }, // Silicon Labs CP210x
+  { usbVendorId: 0x1A86, usbProductId: 0x7523 }, // CH340
+  { usbVendorId: 0x1A86, usbProductId: 0x55D4 }, // CH9102
+  { usbVendorId: 0x0403, usbProductId: 0x6001 }, // FTDI
+  { usbVendorId: 0x303A },                       // USB nativo de Espressif (S2, S3, C3)
+];
+let mostrarTodos = false;
+elemento('conectar-todos').addEventListener('click', () => {
+  mostrarTodos = true;
+  conectarWifi.click();
+});
+
 const espera = ms => new Promise(resolver => setTimeout(resolver, ms));
 const caracteresInvalidos = /[\0\r\n\t]/;
 
@@ -433,6 +467,8 @@ function controlesWifi() {
   elemento('zona-wifi').hidden = !conexionWifi;
   conectarWifi.hidden = Boolean(conexionWifi);
   conectarWifi.disabled = usbOcupado || !usuarioUsb;
+  elemento('conectar-todos').hidden = Boolean(conexionWifi);
+  elemento('conectar-todos').disabled = conectarWifi.disabled;
   buscarWifi.disabled = ocupado;
   for (const boton of elemento('redes-guardadas').querySelectorAll('button')) boton.disabled = ocupado;
   for (const boton of elemento('redes-cercanas').querySelectorAll('button')) boton.disabled = ocupado;
@@ -654,7 +690,9 @@ conectarWifi.addEventListener('click', async () => {
   controlesWifi();
   let puerto;
   try {
-    puerto = await navigator.serial.requestPort();
+    const todos = mostrarTodos;
+    mostrarTodos = false;
+    puerto = await navigator.serial.requestPort(todos ? {} : { filters: filtrosEsp32 });
     if (!wifi.open) return;
     await puerto.open({ baudRate: 115200 });
     if (!wifi.open) {
@@ -676,8 +714,9 @@ conectarWifi.addEventListener('click', async () => {
   } catch (error) {
     if (puerto?.readable) await puerto.close().catch(() => {});
     estadoWifi.textContent = error.name === 'NotFoundError'
-      ? 'Selecciona el puerto del ESP32 para continuar.'
+      ? 'No se eligió ningún puerto. Si la lista salió vacía, prueba «Mostrar todos los puertos»; si sigue vacía, el equipo no ve la placa: revisa la ayuda de abajo.'
       : 'No se pudo abrir el puerto. Cierra el Monitor serie de Arduino IDE si está en uso.';
+    elemento('ayuda-puerto').open = true;
   } finally {
     usbOcupado = false;
     controlesWifi();
