@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAWI · Radiación solar</title>
+<style>
+  * { box-sizing: border-box }
+  body { margin: 0; color: #edf8f1; background: #101817; font: 1rem/1.5 system-ui, sans-serif }
+  main { width: min(100% - 2rem, 42rem); margin: clamp(2rem, 8vh, 5rem) auto }
+  h1 { margin: 0 0 1rem; font-size: clamp(1.65rem, 6vw, 2.7rem); line-height: 1.12 }
+  h2 { font-size: 1.2rem; margin: 1.5rem 0 .6rem }
+  form, .panel { padding: clamp(1.2rem, 5vw, 2rem); background: #1b2824; border: 1px solid #42554b; border-radius: .9rem }
+  label { display: block; margin: 0 0 .9rem }
+  input, button { font: inherit; border-radius: .45rem }
+  input { width: 100%; margin-top: .35rem; padding: .65rem; border: 1px solid #6b8175; background: #101817; color: inherit }
+  button { cursor: pointer; padding: .55rem .95rem; border: 1px solid #ccf078; background: #ccf078; color: #182215; font-weight: 650 }
+  button:disabled { opacity: .6; cursor: wait }
+  .acciones { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: 1.2rem }
+  .secundario { background: transparent; color: #ccf078 }
+  #radiacion { display: block; color: #ccf078; font-size: clamp(2.9rem, 12vw, 5.4rem); line-height: 1.05; font-weight: 650 }
+  #estado, #mensaje { color: #c1d1c7 }
+  #mensaje:empty { display: none }
+  dl { margin: 0; border-top: 1px solid #42554b }
+  dl div { display: flex; justify-content: space-between; gap: 1rem; padding: .55rem 0; border-bottom: 1px solid #42554b }
+  dd { margin: 0; text-align: right }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums }
+  th, td { padding: .6rem .25rem; border-bottom: 1px solid #42554b; text-align: right }
+  th:first-child, td:first-child { text-align: left }
+  [hidden] { display: none !important }
+</style>
+</head>
+<body>
+<main>
+  <h1>Radiación solar en vivo</h1>
+  <form id="login">
+    <label>Usuario
+      <input id="usuario" autocomplete="username" required>
+    </label>
+    <label>Contraseña
+      <input id="clave" type="password" autocomplete="current-password" required>
+    </label>
+    <button id="entrar">Iniciar sesión</button>
+    <p id="mensaje" role="status"></p>
+  </form>
+  <div id="contenido" hidden>
+    <section class="panel" aria-label="Última lectura del ESP32">
+      <output id="radiacion" aria-live="polite">—</output>
+      <span>W/m² · Calibración preliminar</span>
+      <p id="estado" role="status">Esperando la primera lectura del ESP32.</p>
+      <dl>
+        <div><dt>Tensión en A0</dt><dd id="tension">—</dd></div>
+        <div><dt>Luxómetro BH1750</dt><dd id="lux">—</dd></div>
+        <div><dt>Temperatura</dt><dd id="temperatura">—</dd></div>
+        <div><dt>Humedad</dt><dd id="humedad">—</dd></div>
+      </dl>
+      <div class="acciones">
+        <button id="descarga">Descargar JSON de la última hora</button>
+        <button type="button" class="secundario" id="salir">Cerrar sesión</button>
+      </div>
+    </section>
+    <section id="historial" hidden>
+      <h2>Últimas lecturas guardadas</h2>
+      <table>
+        <thead><tr><th>Hora (Lima)</th><th>W/m²</th><th>mV</th><th>Lux</th></tr></thead>
+        <tbody id="filas"></tbody>
+      </table>
+    </section>
+  </div>
+</main>
+<script>
+const servicio = 'https://mawi-radiacion-solar.keentangerine256.chatgpt.site';
+const elemento = id => document.getElementById(id);
+const reloj = new Intl.DateTimeFormat('es-PE', {
+  hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Lima',
+});
+let sesion = '';
+let temporizador;
+
+function numero(valor, decimales, unidad = '') {
+  return valor == null ? '—' : new Intl.NumberFormat('es-PE', {
+    minimumFractionDigits: decimales, maximumFractionDigits: decimales,
+  }).format(valor) + unidad;
+}
+
+function mostrar({ lectura, historial }) {
+  elemento('radiacion').textContent = numero(lectura?.irradiancia_wm2, 1);
+  elemento('tension').textContent = numero(lectura?.tension_mv, 3, ' mV');
+  elemento('lux').textContent = lectura?.estado_lux === 'SIN_BH1750'
+    ? 'Sensor sin detectar' : numero(lectura?.lux, 1, ' lx');
+  elemento('temperatura').textContent = numero(lectura?.temperatura_c, 1, ' °C');
+  elemento('humedad').textContent = numero(lectura?.humedad_pct, 1, ' %');
+  const reciente = lectura && Date.now() - lectura.recibido < 45000;
+  elemento('estado').textContent = lectura
+    ? (reciente ? 'Última lectura · ' : 'Sin lecturas nuevas · ') + reloj.format(lectura.recibido)
+    : 'Esperando la primera lectura del ESP32.';
+  elemento('historial').hidden = historial.length === 0;
+  elemento('filas').replaceChildren(...historial.map(dato => {
+    const fila = document.createElement('tr');
+    for (const valor of [
+      reloj.format(dato.recibido), numero(dato.irradiancia_wm2, 1),
+      numero(dato.tension_mv, 3), numero(dato.lux, 1),
+    ]) {
+      const celda = document.createElement('td');
+      celda.textContent = valor;
+      fila.append(celda);
+    }
+    return fila;
+  }));
+}
+
+async function solicitar(ruta, autorizacion) {
+  const respuesta = await fetch(servicio + ruta, {
+    headers: { Authorization: autorizacion },
+    cache: 'no-store',
+  });
+  if (respuesta.status === 401) throw new Error('Usuario o contraseña incorrectos.');
+  if (!respuesta.ok) throw new Error('El servicio de lecturas no está disponible.');
+  return respuesta;
+}
+
+async function actualizar() {
+  const actual = sesion;
+  if (!actual) return;
+  try {
+    const respuesta = await solicitar('/api/lectura', actual);
+    const dato = await respuesta.json();
+    if (sesion === actual) mostrar(dato);
+  } catch {
+    if (sesion === actual) elemento('estado').textContent = 'No se pudo actualizar la lectura.';
+  } finally {
+    if (sesion === actual) temporizador = setTimeout(actualizar, 5000);
+  }
+}
+
+elemento('login').addEventListener('submit', async evento => {
+  evento.preventDefault();
+  elemento('mensaje').textContent = '';
+  elemento('entrar').disabled = true;
+  try {
+    const autorizacion = 'Basic ' + btoa(elemento('usuario').value + ':' + elemento('clave').value);
+    const respuesta = await solicitar('/api/lectura', autorizacion);
+    const dato = await respuesta.json();
+    if (!dato.autenticado) throw new Error('El inicio de sesión aún no está disponible.');
+    mostrar(dato);
+    sesion = autorizacion;
+    elemento('clave').value = '';
+    elemento('login').hidden = true;
+    elemento('contenido').hidden = false;
+    temporizador = setTimeout(actualizar, 5000);
+  } catch (error) {
+    elemento('mensaje').textContent = error.message || 'No se pudo iniciar sesión.';
+  } finally {
+    elemento('entrar').disabled = false;
+  }
+});
+
+elemento('salir').addEventListener('click', () => {
+  sesion = '';
+  clearTimeout(temporizador);
+  elemento('contenido').hidden = true;
+  elemento('login').hidden = false;
+  elemento('clave').focus();
+});
+
+elemento('descarga').addEventListener('click', async () => {
+  elemento('descarga').disabled = true;
+  try {
+    const respuesta = await solicitar('/api/exportacion', sesion);
+    const nombre = /filename="([^"]+)"/.exec(respuesta.headers.get('Content-Disposition') || '')?.[1];
+    const url = URL.createObjectURL(await respuesta.blob());
+    const enlace = document.createElement('a');
+    enlace.href = url;
+    enlace.download = nombre || 'mawi-ultima-hora.json';
+    enlace.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch {
+    elemento('estado').textContent = 'No se pudo descargar el JSON.';
+  } finally {
+    elemento('descarga').disabled = false;
+  }
+});
+</script>
+</body>
+</html>
