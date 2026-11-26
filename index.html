@@ -27,6 +27,9 @@
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums }
   th, td { padding: .6rem .25rem; border-bottom: 1px solid #42554b; text-align: right }
   th:first-child, td:first-child { text-align: left }
+  dialog { width: min(100% - 2rem, 26rem); padding: 1.4rem; color: inherit; background: #1b2824; border: 1px solid #6b8175; border-radius: .9rem }
+  dialog::backdrop { background: rgb(0 0 0 / .65) }
+  dialog h2 { margin-top: 0 }
   [hidden] { display: none !important }
 </style>
 </head>
@@ -67,15 +70,31 @@
       </table>
     </section>
   </div>
+  <dialog id="aviso-esp32" aria-labelledby="titulo-aviso" aria-describedby="mensaje-aviso">
+    <h2 id="titulo-aviso">El ESP32 se desconectó</h2>
+    <p id="mensaje-aviso">Revisa la batería o la red Wi-Fi.</p>
+    <button type="button" id="cerrar-aviso">Cerrar</button>
+  </dialog>
 </main>
 <script>
 const servicio = 'https://mawi-radiacion-solar.keentangerine256.chatgpt.site';
+const intervaloLectura = 5000;
+const limiteSinLectura = 15000;
 const elemento = id => document.getElementById(id);
+const aviso = elemento('aviso-esp32');
 const reloj = new Intl.DateTimeFormat('es-PE', {
   hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Lima',
 });
 let sesion = '';
 let temporizador;
+let avisoMostrado = false;
+
+function restablecerAviso() {
+  avisoMostrado = false;
+  if (aviso.open) aviso.close();
+}
+
+elemento('cerrar-aviso').addEventListener('click', () => aviso.close());
 
 function numero(valor, decimales, unidad = '') {
   return valor == null ? '—' : new Intl.NumberFormat('es-PE', {
@@ -90,7 +109,14 @@ function mostrar({ lectura, historial }) {
     ? 'Sensor sin detectar' : numero(lectura?.lux, 1, ' lx');
   elemento('temperatura').textContent = numero(lectura?.temperatura_c, 1, ' °C');
   elemento('humedad').textContent = numero(lectura?.humedad_pct, 1, ' %');
-  const reciente = lectura && Date.now() - lectura.recibido < 45000;
+  const restante = lectura ? lectura.recibido + limiteSinLectura - Date.now() : 0;
+  const reciente = restante > 0;
+  if (reciente) {
+    restablecerAviso();
+  } else if (lectura && !avisoMostrado) {
+    aviso.showModal();
+    avisoMostrado = true;
+  }
   elemento('estado').textContent = lectura
     ? (reciente ? 'Última lectura · ' : 'Sin lecturas nuevas · ') + reloj.format(lectura.recibido)
     : 'Esperando la primera lectura del ESP32.';
@@ -107,6 +133,7 @@ function mostrar({ lectura, historial }) {
     }
     return fila;
   }));
+  return reciente ? Math.min(intervaloLectura, restante) : intervaloLectura;
 }
 
 async function solicitar(ruta, autorizacion) {
@@ -122,14 +149,15 @@ async function solicitar(ruta, autorizacion) {
 async function actualizar() {
   const actual = sesion;
   if (!actual) return;
+  let espera = intervaloLectura;
   try {
     const respuesta = await solicitar('/api/lectura', actual);
     const dato = await respuesta.json();
-    if (sesion === actual) mostrar(dato);
+    if (sesion === actual) espera = mostrar(dato);
   } catch {
     if (sesion === actual) elemento('estado').textContent = 'No se pudo actualizar la lectura.';
   } finally {
-    if (sesion === actual) temporizador = setTimeout(actualizar, 5000);
+    if (sesion === actual) temporizador = setTimeout(actualizar, espera);
   }
 }
 
@@ -142,12 +170,11 @@ elemento('login').addEventListener('submit', async evento => {
     const respuesta = await solicitar('/api/lectura', autorizacion);
     const dato = await respuesta.json();
     if (!dato.autenticado) throw new Error('El inicio de sesión aún no está disponible.');
-    mostrar(dato);
     sesion = autorizacion;
     elemento('clave').value = '';
     elemento('login').hidden = true;
     elemento('contenido').hidden = false;
-    temporizador = setTimeout(actualizar, 5000);
+    temporizador = setTimeout(actualizar, mostrar(dato));
   } catch (error) {
     elemento('mensaje').textContent = error.message || 'No se pudo iniciar sesión.';
   } finally {
@@ -158,6 +185,7 @@ elemento('login').addEventListener('submit', async evento => {
 elemento('salir').addEventListener('click', () => {
   sesion = '';
   clearTimeout(temporizador);
+  restablecerAviso();
   elemento('contenido').hidden = true;
   elemento('login').hidden = false;
   elemento('clave').focus();
