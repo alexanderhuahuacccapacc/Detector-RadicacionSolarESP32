@@ -1,0 +1,128 @@
+MAWI · Código del ESP32 y configuración Wi-Fi
+=============================================
+
+Archivos
+
+  WIFIESP2/WIFIESP2.ino       Firmware del registrador.
+  WIFIESP2/CertificadoMawi.h  Certificado público para verificar la conexión HTTPS.
+  vista-web/index.html      Panel de lecturas y configuración Wi-Fi por USB.
+  vista-web/Dockerfile      Opción de despliegue como servicio Docker.
+  herramientas/ver_radiacion.py  Visor local de lecturas por USB.
+
+1. Abrir y preparar el código
+
+  1) Extrae el ZIP. Conserva juntos WIFIESP2.ino y CertificadoMawi.h dentro
+     de la carpeta WIFIESP2.
+  2) Abre WIFIESP2/WIFIESP2.ino en Arduino IDE.
+  3) En el Gestor de placas instala «esp32 by Espressif Systems».
+     Si el paquete no aparece, agrega esta URL adicional en Preferencias.
+     https://espressif.github.io/arduino-esp32/package_esp32_index.json
+  4) En el Gestor de bibliotecas instala Adafruit ADS1X15, BH1750, RTClib y
+     DHT sensor library. Acepta sus dependencias Adafruit BusIO y
+     Adafruit Unified Sensor.
+     Versiones probadas: esp32 4.0.0, ADS1X15 2.6.2, BH1750 1.3.0,
+     RTClib 2.1.4 y DHT sensor library 1.4.7.
+  5) En Herramientas elige «ESP32 Dev Module» y, en Partition Scheme,
+     «Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)». Selecciona el
+     puerto de la placa. Durante las pruebas fue el adaptador
+     Silicon Labs CP210x en COM8.
+  6) Conecta la placa por USB, cierra las otras ventanas que usen el
+     puerto, compila con Verificar y carga el programa con Subir.
+
+2. Guardar una red Wi-Fi por USB
+
+  Opción A · Desde la vista web
+
+  1) En Chrome de escritorio, abre
+     https://detector-radicacionsolaresp32.onrender.com/
+  2) Pulsa Wi-Fi y luego Conectar por USB. Elige el puerto de la placa.
+  3) Escribe el SSID y la contraseña, y pulsa Guardar en el ESP32.
+     Una red abierta se registra con el campo de contraseña vacío.
+  4) Espera el mensaje «Red guardada en el ESP32». Repite para cada red.
+     La placa admite cuatro redes de 2,4 GHz. Si vuelves a enviar el
+     mismo SSID, se actualiza su contraseña en la misma ranura.
+  5) Cierra el formulario para liberar el puerto USB. La lista de la vista
+     muestra los nombres registrados desde ese navegador.
+
+  Opción B · Desde el Monitor serie
+
+  1) Selecciona la velocidad de 115200 baudios y el final de línea
+     Nueva línea. Cierra la vista Wi-Fi si tiene abierto el puerto.
+  2) Envía: wifi NOMBRE<TAB>CONTRASEÑA
+     Sustituye <TAB> por una tabulación real. Si la interfaz del Monitor
+     serie cambia el foco al presionar Tab, pega la línea con la tabulación
+     ya incluida o usa la opción A.
+  3) El ESP32 confirma con «Wi-Fi: red guardada NOMBRE». Las redes se
+     conservan en la memoria del ESP32 al reiniciar.
+
+  Yanacucho fue la red usada en la última prueba de batería.
+  Las contraseñas y el token de publicación se configuran por USB y se
+  guardan en el ESP32. En este ZIP se incluye el procedimiento de
+  configuración.
+
+3. Comprobar el envío a la web
+
+  1) Deja al alcance una de las redes guardadas con acceso a Internet.
+  2) En el Monitor serie debe aparecer «Wi-Fi conectado. IP: ...» y
+     «Nube: HTTP 204» cuando el servidor acepte las lecturas.
+  3) Ingresa al panel de Render y revisa el historial. La placa toma
+     una medición cada 5 segundos. Al pasar 15 segundos sin una lectura
+     nueva, el panel muestra el aviso de desconexión.
+  4) Para probar con batería, desconecta el USB, enciende S1 y verifica
+     en el panel que sigan entrando lecturas.
+  5) Al preparar una placa nueva, envía por Monitor serie:
+     nube TOKEN_DE_PUBLICACION
+     Usa el token autorizado del servicio de datos, de 64 caracteres
+     hexadecimales en minúscula. Este comando responde «Nube: clave guardada».
+     En la placa ya configurada basta con conservar su memoria de ajustes.
+
+4. Dónde modificar el programa
+
+  INTERVALO_MS       Intervalo de medición. Actualmente 5000 ms.
+  REINTENTO_WIFI_MS  Espera entre intentos de conexión o de envío.
+  CLAVES_RED        Cuatro claves internas de memoria para los perfiles Wi-Fi.
+  configurarWiFi()  Guarda o actualiza un perfil Wi-Fi.
+  tareaRed()        Busca redes guardadas y envía las lecturas por HTTPS.
+  URL_MAWI          Dirección del endpoint que recibe las mediciones.
+  R_SHUNT           Resistencia total del shunt R1. Actualmente 1,5 Ω.
+
+  La web consume los datos del servicio indicado en la constante
+  «servicio» de vista-web/index.html. Si cambias de servidor, actualiza
+  esa dirección y URL_MAWI. Comprueba que CertificadoMawi.h siga validando
+  el certificado del nuevo dominio antes de cargar el firmware.
+
+  Otros comandos del ESP32:
+    i2c                          Escanea el bus de sensores.
+    hora AAAA-MM-DD HH:MM:SS      Ajusta el reloj DS3231 en hora local.
+
+5. Usar las vistas incluidas
+
+  En Render Static Site, coloca vista-web/index.html en la carpeta que
+  elijas publicar. Si lo colocas en la raíz del repositorio, usa ./ como
+  Publish Directory. El HTML se publica como archivo estático.
+  El Dockerfile sirve para la opción de servicio web Docker.
+
+  Para una lectura local por USB con Python desde la raíz del ZIP extraído:
+    python -m pip install pyserial
+    python herramientas/ver_radiacion.py --com COM8
+  Abre http://127.0.0.1:8765/ y sustituye COM8 si Windows asignó otro puerto.
+  Cierra el Monitor serie o la configuración Wi-Fi antes de abrir este visor.
+
+6. Gestión de redes desde la web (comandos nuevos)
+
+  La web publicada en Render busca redes, guarda y borra redes usando estos
+  comandos por USB. También sirven desde el Monitor serie (115200, Nueva línea):
+    escanear         Lista las redes cercanas: WIFI_RED <dBm> <abierta 0/1> <SSID>
+    listar           Lista las redes guardadas (sin claves) y la conectada ahora.
+    borrar NOMBRE    Libera la ranura de esa red.
+    wifi NOMBRE<TAB>CLAVE   Guarda la red y conecta de inmediato a ella.
+
+  Cada laptop necesita que el sistema reconozca la placa una sola vez. En
+  Windows debe verse «Silicon Labs CP210x» (o CH340) en Puertos (COM y LPT).
+  Si no aparece, instala el controlador CP210x o CH340.
+
+7. Estructura del repositorio
+
+  index.html, Dockerfile   Panel web que sirve Render (raíz del repositorio).
+  firmware/                Código del ESP32. No lo usa Render: el Dockerfile
+                           solo copia index.html.
