@@ -9,6 +9,11 @@
   body { margin: 0; color: #edf8f1; background: #101817; font: 1rem/1.5 system-ui, sans-serif }
   main { width: min(100% - 2rem, 42rem); margin: clamp(2rem, 8vh, 5rem) auto }
   h1 { margin: 0 0 1rem; font-size: clamp(1.65rem, 6vw, 2.7rem); line-height: 1.12 }
+  .cabecera { display: flex; justify-content: space-between; align-items: flex-start; gap: .75rem }
+  .boton-wifi { display: inline-flex; align-items: center; gap: .45rem; white-space: nowrap }
+  .icono-wifi { display: inline-block; position: relative; flex: none; width: 1rem; height: .75rem; border-top: 2px solid; border-radius: 50% }
+  .icono-wifi::before { content: ""; position: absolute; inset: .17rem .17rem 0; border-top: 2px solid; border-radius: 50% }
+  .icono-wifi::after { content: ""; position: absolute; bottom: .05rem; left: .4rem; width: .2rem; height: .2rem; background: currentColor; border-radius: 50% }
   h2 { font-size: 1.2rem; margin: 1.5rem 0 .6rem }
   form, .panel { padding: clamp(1.2rem, 5vw, 2rem); background: #1b2824; border: 1px solid #42554b; border-radius: .9rem }
   label { display: block; margin: 0 0 .9rem }
@@ -30,12 +35,21 @@
   dialog { width: min(100% - 2rem, 26rem); padding: 1.4rem; color: inherit; background: #1b2824; border: 1px solid #6b8175; border-radius: .9rem }
   dialog::backdrop { background: rgb(0 0 0 / .65) }
   dialog h2 { margin-top: 0 }
+  #config-wifi { width: min(100% - 2rem, 31rem) }
+  #config-wifi form { padding: 0; border: 0 }
+  #redes-wifi { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; list-style: none }
+  #redes-wifi button { padding: .25rem .6rem; overflow-wrap: anywhere }
   [hidden] { display: none !important }
 </style>
 </head>
 <body>
 <main>
-  <h1>Radiación solar en vivo</h1>
+  <header class="cabecera">
+    <h1>Radiación solar en vivo</h1>
+    <button type="button" class="boton-wifi secundario" id="abrir-wifi" aria-haspopup="dialog">
+      <span class="icono-wifi" aria-hidden="true"></span>Wi-Fi
+    </button>
+  </header>
   <form id="login">
     <label>Usuario
       <input id="usuario" autocomplete="username" required>
@@ -75,6 +89,29 @@
     <p id="mensaje-aviso">Revisa la batería o la red Wi-Fi.</p>
     <button type="button" id="cerrar-aviso">Cerrar</button>
   </dialog>
+  <dialog id="config-wifi" aria-labelledby="titulo-wifi">
+    <h2 id="titulo-wifi">Wi-Fi del ESP32</h2>
+    <p>Conecta el ESP32 por USB. Puedes guardar hasta cuatro redes en la placa.</p>
+    <p id="estado-wifi" role="status"></p>
+    <div class="acciones">
+      <button type="button" id="conectar-wifi">Conectar por USB</button>
+      <button type="button" class="secundario" id="cerrar-wifi">Cerrar</button>
+    </div>
+    <section aria-labelledby="titulo-redes">
+      <h2 id="titulo-redes">Redes registradas desde este navegador</h2>
+      <p id="sin-redes">Aún no has registrado redes desde aquí.</p>
+      <ul id="redes-wifi"></ul>
+    </section>
+    <form id="form-wifi" hidden>
+      <label>Nombre de la red (SSID)
+        <input id="nombre-wifi" autocomplete="off" required>
+      </label>
+      <label>Contraseña (déjala vacía para una red abierta)
+        <input id="clave-wifi" type="password" autocomplete="off">
+      </label>
+      <button id="guardar-wifi">Guardar en el ESP32</button>
+    </form>
+  </dialog>
 </main>
 <script>
 const servicio = 'https://mawi-radiacion-solar.keentangerine256.chatgpt.site';
@@ -82,6 +119,7 @@ const intervaloLectura = 5000;
 const limiteSinLectura = 15000;
 const elemento = id => document.getElementById(id);
 const aviso = elemento('aviso-esp32');
+const wifi = elemento('config-wifi');
 const reloj = new Intl.DateTimeFormat('es-PE', {
   hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Lima',
 });
@@ -113,7 +151,7 @@ function mostrar({ lectura, historial }) {
   const reciente = restante > 0;
   if (reciente) {
     restablecerAviso();
-  } else if (lectura && !avisoMostrado) {
+  } else if (lectura && !avisoMostrado && !wifi.open) {
     aviso.showModal();
     avisoMostrado = true;
   }
@@ -207,6 +245,189 @@ elemento('descarga').addEventListener('click', async () => {
   } finally {
     elemento('descarga').disabled = false;
   }
+});
+
+const usuarioUsb = 'serial' in navigator;
+const claveHistorialWifi = 'mawi-redes-registradas';
+const nombreWifi = elemento('nombre-wifi');
+const claveWifi = elemento('clave-wifi');
+const estadoWifi = elemento('estado-wifi');
+const conectarWifi = elemento('conectar-wifi');
+const guardarWifi = elemento('guardar-wifi');
+const formWifi = elemento('form-wifi');
+const codificador = new TextEncoder();
+let conexionWifi = null;
+let usbOcupado = false;
+let redesWifi = [];
+
+try {
+  const datos = JSON.parse(localStorage.getItem(claveHistorialWifi) || '[]');
+  if (Array.isArray(datos)) redesWifi = datos.filter(nombre => typeof nombre === 'string').slice(0, 4);
+} catch {
+  redesWifi = [];
+}
+
+function mostrarRedesWifi() {
+  elemento('sin-redes').hidden = redesWifi.length > 0;
+  elemento('redes-wifi').replaceChildren(...redesWifi.map(nombre => {
+    const fila = document.createElement('li');
+    const boton = document.createElement('button');
+    boton.type = 'button';
+    boton.className = 'secundario';
+    boton.textContent = nombre;
+    boton.addEventListener('click', () => {
+      nombreWifi.value = nombre;
+      if (conexionWifi) claveWifi.focus();
+    });
+    fila.append(boton);
+    return fila;
+  }));
+}
+
+function controlesWifi() {
+  formWifi.hidden = !conexionWifi;
+  conectarWifi.hidden = Boolean(conexionWifi);
+  conectarWifi.disabled = usbOcupado || !usuarioUsb;
+  guardarWifi.disabled = usbOcupado || Boolean(conexionWifi?.pendiente);
+}
+
+async function leerPuertoWifi(conexion) {
+  const decodificador = new TextDecoder();
+  let pendiente = '';
+  try {
+    while (true) {
+      const { value, done } = await conexion.lector.read();
+      if (done) break;
+      const lineas = (pendiente + decodificador.decode(value, { stream: true })).split('\n');
+      pendiente = lineas.pop().slice(-1024);
+      for (const cruda of lineas) {
+        const solicitud = conexion.pendiente;
+        if (!solicitud) continue;
+        const linea = cruda.replace(/\r$/, '');
+        if (linea === 'Wi-Fi: red guardada ' + solicitud.nombre) {
+          solicitud.resolver({ guardada: true });
+        } else if (/^Wi-Fi: (las cuatro ranuras|error al guardar)|^Formato Wi-Fi:/.test(linea)) {
+          solicitud.resolver({ mensaje: linea });
+        }
+      }
+    }
+  } catch {
+    // La lectura termina si el cable se retira o el navegador cierra el puerto.
+  } finally {
+    conexion.lector.releaseLock();
+  }
+}
+
+async function soltarPuertoWifi(mensaje) {
+  const conexion = conexionWifi;
+  if (!conexion) return;
+  conexionWifi = null;
+  usbOcupado = true;
+  controlesWifi();
+  conexion.pendiente?.resolver({ mensaje: 'El USB se desconectó durante el envío.' });
+  await conexion.lector.cancel().catch(() => {});
+  await conexion.lectura;
+  await conexion.escritura?.catch(() => {});
+  await conexion.puerto.close().catch(() => {});
+  usbOcupado = false;
+  estadoWifi.textContent = mensaje;
+  controlesWifi();
+}
+
+conectarWifi.addEventListener('click', async () => {
+  usbOcupado = true;
+  controlesWifi();
+  let puerto;
+  try {
+    puerto = await navigator.serial.requestPort();
+    if (!wifi.open) return;
+    await puerto.open({ baudRate: 115200 });
+    if (!wifi.open) {
+      await puerto.close();
+      return;
+    }
+    const conexion = { puerto, lector: puerto.readable.getReader() };
+    conexionWifi = conexion;
+    conexion.lectura = leerPuertoWifi(conexion);
+    void conexion.lectura.then(() => {
+      if (conexionWifi === conexion) void soltarPuertoWifi('USB desconectado. Vuelve a conectar la placa.');
+    });
+    estadoWifi.textContent = 'ESP32 conectado por USB.';
+  } catch (error) {
+    if (puerto?.readable) await puerto.close().catch(() => {});
+    estadoWifi.textContent = error.name === 'NotFoundError'
+      ? 'Selecciona el puerto del ESP32 para continuar.'
+      : 'No se pudo abrir el puerto. Cierra el Monitor serie de Arduino IDE si está en uso.';
+  } finally {
+    usbOcupado = false;
+    controlesWifi();
+  }
+});
+
+formWifi.addEventListener('submit', async evento => {
+  evento.preventDefault();
+  const conexion = conexionWifi;
+  if (!conexion || conexion.pendiente) return;
+  const nombre = nombreWifi.value;
+  const clave = claveWifi.value;
+  const caracteresInvalidos = /[\0\r\n\t]/;
+  if (!nombre || codificador.encode(nombre).length > 32 ||
+      codificador.encode(clave).length > 64 ||
+      caracteresInvalidos.test(nombre) || caracteresInvalidos.test(clave)) {
+    estadoWifi.textContent = 'El SSID admite hasta 32 bytes y la clave hasta 64. Usa una sola línea por campo.';
+    return;
+  }
+
+  let tiempo;
+  const confirmacion = new Promise(resolver => {
+    conexion.pendiente = { nombre, resolver };
+    tiempo = setTimeout(() => resolver({ mensaje: 'El ESP32 no confirmó el guardado.' }), 7000);
+  });
+  controlesWifi();
+  estadoWifi.textContent = 'Guardando la red en el ESP32…';
+  try {
+    conexion.escritura = (async () => {
+      const escritor = conexion.puerto.writable.getWriter();
+      try {
+        await escritor.write(codificador.encode('wifi ' + nombre + '\t' + clave + '\n'));
+      } finally {
+        escritor.releaseLock();
+      }
+    })();
+    const [respuesta] = await Promise.all([confirmacion, conexion.escritura]);
+    if (respuesta.guardada) {
+      redesWifi = [nombre, ...redesWifi.filter(red => red !== nombre)].slice(0, 4);
+      try {
+        localStorage.setItem(claveHistorialWifi, JSON.stringify(redesWifi));
+      } catch {
+        // El historial sigue disponible mientras la página esté abierta.
+      }
+      mostrarRedesWifi();
+    }
+    estadoWifi.textContent = respuesta.guardada ? 'Red guardada en el ESP32: ' + nombre : respuesta.mensaje;
+  } catch {
+    estadoWifi.textContent = 'No se pudo enviar la configuración por USB.';
+  } finally {
+    clearTimeout(tiempo);
+    conexion.pendiente = null;
+    conexion.escritura = null;
+    claveWifi.value = '';
+    controlesWifi();
+  }
+});
+
+elemento('abrir-wifi').addEventListener('click', () => {
+  mostrarRedesWifi();
+  estadoWifi.textContent = usuarioUsb
+    ? 'Pulsa Conectar por USB y selecciona el puerto del ESP32.'
+    : 'Abre la página en Chrome de escritorio para usar el puerto USB.';
+  controlesWifi();
+  wifi.showModal();
+});
+elemento('cerrar-wifi').addEventListener('click', () => wifi.close());
+wifi.addEventListener('close', () => {
+  claveWifi.value = '';
+  void soltarPuertoWifi('');
 });
 </script>
 </body>
