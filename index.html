@@ -23,6 +23,7 @@
   button:disabled { opacity: .6; cursor: wait }
   .acciones { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: 1.2rem }
   .secundario { background: transparent; color: #ccf078 }
+  .peligro { background: transparent; color: #ffb4a8; border-color: #ffb4a8 }
   #radiacion { display: block; color: #ccf078; font-size: clamp(2.9rem, 12vw, 5.4rem); line-height: 1.05; font-weight: 650 }
   #estado, #mensaje { color: #c1d1c7 }
   #mensaje:empty { display: none }
@@ -35,10 +36,16 @@
   dialog { width: min(100% - 2rem, 26rem); padding: 1.4rem; color: inherit; background: #1b2824; border: 1px solid #6b8175; border-radius: .9rem }
   dialog::backdrop { background: rgb(0 0 0 / .65) }
   dialog h2 { margin-top: 0 }
-  #config-wifi { width: min(100% - 2rem, 31rem) }
-  #config-wifi form { padding: 0; border: 0 }
-  #redes-wifi { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; list-style: none }
-  #redes-wifi button { padding: .25rem .6rem; overflow-wrap: anywhere }
+  #config-wifi { width: min(100% - 2rem, 33rem); max-height: 92vh }
+  #config-wifi form { padding: 1rem; background: #101817; border: 1px solid #6b8175 }
+  #config-wifi h3 { margin: 1.4rem 0 .5rem; font-size: 1.05rem }
+  .lista-wifi { display: grid; gap: .45rem; margin: 0; padding: 0; list-style: none }
+  .lista-wifi li { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .35rem .6rem; border: 1px solid #42554b; border-radius: .45rem }
+  .lista-wifi .nombre { overflow-wrap: anywhere }
+  .lista-wifi .nota { color: #c1d1c7; font-size: .9rem; white-space: nowrap }
+  .lista-wifi button { padding: .25rem .6rem }
+  .vacio { margin: 0; color: #c1d1c7 }
+  #aviso-llena { color: #ffd98a }
   [hidden] { display: none !important }
 </style>
 </head>
@@ -72,7 +79,7 @@
         <div><dt>Humedad</dt><dd id="humedad">—</dd></div>
       </dl>
       <div class="acciones">
-        <button id="descarga">Descargar JSON de la última hora</button>
+        <button id="descarga">Descargar Excel de la última hora</button>
         <button type="button" class="secundario" id="salir">Cerrar sesión</button>
       </div>
     </section>
@@ -91,37 +98,54 @@
   </dialog>
   <dialog id="config-wifi" aria-labelledby="titulo-wifi">
     <h2 id="titulo-wifi">Wi-Fi del ESP32</h2>
-    <p>Conecta el ESP32 por USB. Puedes guardar hasta cuatro redes en la placa.</p>
+    <p>Conecta el ESP32 por USB. Puede guardar hasta cuatro redes.</p>
     <p id="estado-wifi" role="status"></p>
     <div class="acciones">
       <button type="button" id="conectar-wifi">Conectar por USB</button>
       <button type="button" class="secundario" id="cerrar-wifi">Cerrar</button>
     </div>
-    <section aria-labelledby="titulo-redes">
-      <h2 id="titulo-redes">Redes registradas desde este navegador</h2>
-      <p id="sin-redes">Aún no has registrado redes desde aquí.</p>
-      <ul id="redes-wifi"></ul>
+
+    <section id="zona-wifi" hidden aria-labelledby="titulo-guardadas">
+      <h3 id="titulo-guardadas">Redes guardadas en el ESP32 <span id="contador-wifi"></span></h3>
+      <p class="vacio" id="sin-redes">No hay redes guardadas.</p>
+      <ul class="lista-wifi" id="redes-guardadas"></ul>
+
+      <h3 id="titulo-cercanas">Redes cercanas</h3>
+      <button type="button" class="secundario" id="buscar-wifi">Buscar redes</button>
+      <p class="vacio" id="sin-cercanas" hidden>No se detectó ninguna red.</p>
+      <ul class="lista-wifi" id="redes-cercanas"></ul>
+
+      <form id="form-wifi" hidden>
+        <p id="pregunta-wifi"></p>
+        <label>Nombre de la red (SSID)
+          <input id="nombre-wifi" autocomplete="off" required>
+        </label>
+        <label id="etiqueta-clave">Contraseña (déjala vacía para una red abierta)
+          <input id="clave-wifi" type="password" autocomplete="off">
+        </label>
+        <p id="aviso-llena" role="alert" hidden>Las 4 ranuras están ocupadas. Borra una red guardada para poder agregar esta.</p>
+        <div class="acciones">
+          <button id="guardar-wifi">Aceptar y conectar</button>
+          <button type="button" class="secundario" id="cancelar-wifi">Cancelar</button>
+        </div>
+      </form>
     </section>
-    <form id="form-wifi" hidden>
-      <label>Nombre de la red (SSID)
-        <input id="nombre-wifi" autocomplete="off" required>
-      </label>
-      <label>Contraseña (déjala vacía para una red abierta)
-        <input id="clave-wifi" type="password" autocomplete="off">
-      </label>
-      <button id="guardar-wifi">Guardar en el ESP32</button>
-    </form>
   </dialog>
 </main>
 <script>
 const servicio = 'https://mawi-radiacion-solar.keentangerine256.chatgpt.site';
 const intervaloLectura = 5000;
 const limiteSinLectura = 15000;
+const maxRedes = 4;
 const elemento = id => document.getElementById(id);
 const aviso = elemento('aviso-esp32');
 const wifi = elemento('config-wifi');
 const reloj = new Intl.DateTimeFormat('es-PE', {
   hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Lima',
+});
+const fechaLima = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'America/Lima', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
 });
 let sesion = '';
 let temporizador;
@@ -229,67 +253,273 @@ elemento('salir').addEventListener('click', () => {
   elemento('clave').focus();
 });
 
+/* ---------- Exportación a Excel (.xlsx) sin bibliotecas externas ---------- */
+const codificador = new TextEncoder();
+const tablaCrc = (() => {
+  const tabla = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    tabla[n] = c >>> 0;
+  }
+  return tabla;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (const b of bytes) c = tablaCrc[(c ^ b) & 255] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// ZIP sin compresión (método "store"), suficiente para un .xlsx.
+function crearZip(archivos) {
+  const ahora = new Date();
+  const hora = (ahora.getHours() << 11) | (ahora.getMinutes() << 5) | (ahora.getSeconds() >> 1);
+  const fecha = ((ahora.getFullYear() - 1980) << 9) | ((ahora.getMonth() + 1) << 5) | ahora.getDate();
+  const partes = [];
+  const central = [];
+  let desplazamiento = 0;
+  for (const { nombre, datos } of archivos) {
+    const ruta = codificador.encode(nombre);
+    const crc = crc32(datos);
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0x0800, true);
+    local.setUint16(10, hora, true);
+    local.setUint16(12, fecha, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, datos.length, true);
+    local.setUint32(22, datos.length, true);
+    local.setUint16(26, ruta.length, true);
+    partes.push(new Uint8Array(local.buffer), ruta, datos);
+    const cabecera = new DataView(new ArrayBuffer(46));
+    cabecera.setUint32(0, 0x02014b50, true);
+    cabecera.setUint16(4, 20, true);
+    cabecera.setUint16(6, 20, true);
+    cabecera.setUint16(8, 0x0800, true);
+    cabecera.setUint16(12, hora, true);
+    cabecera.setUint16(14, fecha, true);
+    cabecera.setUint32(16, crc, true);
+    cabecera.setUint32(20, datos.length, true);
+    cabecera.setUint32(24, datos.length, true);
+    cabecera.setUint16(28, ruta.length, true);
+    cabecera.setUint32(42, desplazamiento, true);
+    central.push(new Uint8Array(cabecera.buffer), ruta);
+    desplazamiento += 30 + ruta.length + datos.length;
+  }
+  const tamanoCentral = central.reduce((suma, parte) => suma + parte.length, 0);
+  const fin = new DataView(new ArrayBuffer(22));
+  fin.setUint32(0, 0x06054b50, true);
+  fin.setUint16(8, archivos.length, true);
+  fin.setUint16(10, archivos.length, true);
+  fin.setUint32(12, tamanoCentral, true);
+  fin.setUint32(16, desplazamiento, true);
+  return new Blob([...partes, ...central, new Uint8Array(fin.buffer)], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+}
+
+const escaparXml = texto => String(texto)
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function letraColumna(indice) {
+  let letras = '';
+  for (let n = indice + 1; n > 0; n = Math.floor((n - 1) / 26)) {
+    letras = String.fromCharCode(65 + ((n - 1) % 26)) + letras;
+  }
+  return letras;
+}
+
+const encabezados = {
+  recibido: 'Hora (Lima)', capturado: 'Hora del reloj del ESP32', irradiancia_wm2: 'Radiación (W/m²)',
+  tension_mv: 'Tensión (mV)', lux: 'Lux', temperatura_c: 'Temperatura (°C)', humedad_pct: 'Humedad (%)',
+  estado_panel: 'Estado panel', estado_lux: 'Estado lux', estado_dht: 'Estado DHT',
+  tiempo_ms: 'Tiempo (ms)', id: 'Id',
+};
+
+function filasDeExportacion(dato) {
+  const lista = Array.isArray(dato) ? dato : Object.values(dato ?? {}).find(Array.isArray) ?? [];
+  return lista.filter(fila => fila && typeof fila === 'object');
+}
+
+function crearExcel(filas) {
+  const claves = Object.keys(encabezados).filter(clave => filas.some(fila => clave in fila));
+  for (const fila of filas) {
+    for (const clave of Object.keys(fila)) if (!claves.includes(clave)) claves.push(clave);
+  }
+  const valorCelda = (clave, valor) => clave === 'recibido' && typeof valor === 'number'
+    ? fechaLima.format(valor) : valor;
+  const celda = (columna, filaNumero, valor) => {
+    const ref = letraColumna(columna) + filaNumero;
+    if (valor == null || valor === '') return '';
+    if (typeof valor === 'number' && Number.isFinite(valor)) return `<c r="${ref}"><v>${valor}</v></c>`;
+    return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escaparXml(
+      typeof valor === 'object' ? JSON.stringify(valor) : valor)}</t></is></c>`;
+  };
+  const lineas = [`<row r="1">${claves.map((clave, i) => celda(i, 1, encabezados[clave] || clave)).join('')}</row>`];
+  filas.forEach((fila, f) => {
+    lineas.push(`<row r="${f + 2}">${claves.map((clave, i) => celda(i, f + 2, valorCelda(clave, fila[clave]))).join('')}</row>`);
+  });
+  const ancho = claves.map((clave, i) =>
+    `<col min="${i + 1}" max="${i + 1}" width="${clave === 'id' || clave === 'capturado' || clave === 'recibido' ? 24 : 18}" customWidth="1"/>`).join('');
+  const xml = (nombre, contenido) => ({
+    nombre, datos: codificador.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + contenido),
+  });
+  return crearZip([
+    xml('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'),
+    xml('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+    xml('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<sheets><sheet name="Lecturas" sheetId="1" r:id="rId1"/></sheets></workbook>'),
+    xml('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'),
+    xml('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      `<cols>${ancho}</cols><sheetData>${lineas.join('')}</sheetData></worksheet>`),
+  ]);
+}
+
 elemento('descarga').addEventListener('click', async () => {
   elemento('descarga').disabled = true;
   try {
     const respuesta = await solicitar('/api/exportacion', sesion);
-    const nombre = /filename="([^"]+)"/.exec(respuesta.headers.get('Content-Disposition') || '')?.[1];
-    const url = URL.createObjectURL(await respuesta.blob());
+    const origen = /filename="([^"]+)"/.exec(respuesta.headers.get('Content-Disposition') || '')?.[1];
+    const filas = filasDeExportacion(await respuesta.json());
+    if (filas.length === 0) {
+      elemento('estado').textContent = 'No hay lecturas de la última hora para exportar.';
+      return;
+    }
+    if (filas.every(fila => typeof fila.recibido === 'number')) filas.sort((a, b) => a.recibido - b.recibido);
+    const url = URL.createObjectURL(crearExcel(filas));
     const enlace = document.createElement('a');
     enlace.href = url;
-    enlace.download = nombre || 'mawi-ultima-hora.json';
+    enlace.download = (origen || 'mawi-ultima-hora').replace(/\.(json|xlsx)$/i, '') + '.xlsx';
     enlace.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch {
-    elemento('estado').textContent = 'No se pudo descargar el JSON.';
+    elemento('estado').textContent = 'No se pudo descargar el Excel.';
   } finally {
     elemento('descarga').disabled = false;
   }
 });
 
+/* ---------- Wi-Fi del ESP32 por USB ---------- */
 const usuarioUsb = 'serial' in navigator;
-const claveHistorialWifi = 'mawi-redes-registradas';
 const nombreWifi = elemento('nombre-wifi');
 const claveWifi = elemento('clave-wifi');
 const estadoWifi = elemento('estado-wifi');
 const conectarWifi = elemento('conectar-wifi');
 const guardarWifi = elemento('guardar-wifi');
+const buscarWifi = elemento('buscar-wifi');
 const formWifi = elemento('form-wifi');
-const codificador = new TextEncoder();
 let conexionWifi = null;
 let usbOcupado = false;
-let redesWifi = [];
+let guardadas = [];   // [{ ranura, ssid }] leídas del ESP32
+let actual = '';      // red a la que está conectado ahora
+let cercanas = [];    // [{ ssid, rssi, abierta }]
+let seleccion = null; // red cercana elegida, para saber si es abierta
 
-try {
-  const datos = JSON.parse(localStorage.getItem(claveHistorialWifi) || '[]');
-  if (Array.isArray(datos)) redesWifi = datos.filter(nombre => typeof nombre === 'string').slice(0, 4);
-} catch {
-  redesWifi = [];
-}
-
-function mostrarRedesWifi() {
-  elemento('sin-redes').hidden = redesWifi.length > 0;
-  elemento('redes-wifi').replaceChildren(...redesWifi.map(nombre => {
-    const fila = document.createElement('li');
-    const boton = document.createElement('button');
-    boton.type = 'button';
-    boton.className = 'secundario';
-    boton.textContent = nombre;
-    boton.addEventListener('click', () => {
-      nombreWifi.value = nombre;
-      if (conexionWifi) claveWifi.focus();
-    });
-    fila.append(boton);
-    return fila;
-  }));
-}
+const espera = ms => new Promise(resolver => setTimeout(resolver, ms));
+const caracteresInvalidos = /[\0\r\n\t]/;
 
 function controlesWifi() {
-  formWifi.hidden = !conexionWifi;
+  const ocupado = usbOcupado || Boolean(conexionWifi?.pendiente);
+  elemento('zona-wifi').hidden = !conexionWifi;
   conectarWifi.hidden = Boolean(conexionWifi);
   conectarWifi.disabled = usbOcupado || !usuarioUsb;
-  guardarWifi.disabled = usbOcupado || Boolean(conexionWifi?.pendiente);
+  buscarWifi.disabled = ocupado;
+  for (const boton of elemento('redes-guardadas').querySelectorAll('button')) boton.disabled = ocupado;
+  for (const boton of elemento('redes-cercanas').querySelectorAll('button')) boton.disabled = ocupado;
+  guardarWifi.disabled = ocupado || llena();
 }
+
+// Está llena si hay 4 redes y la que se quiere agregar no es una de ellas.
+function llena() {
+  return guardadas.length >= maxRedes && !guardadas.some(red => red.ssid === nombreWifi.value);
+}
+
+function actualizarAvisoLlena() {
+  elemento('aviso-llena').hidden = !(formWifi && !formWifi.hidden && llena());
+  controlesWifi();
+}
+
+function crearFila(nombre, nota) {
+  const fila = document.createElement('li');
+  const texto = document.createElement('span');
+  texto.className = 'nombre';
+  texto.textContent = nombre;
+  fila.append(texto);
+  if (nota) {
+    const detalle = document.createElement('span');
+    detalle.className = 'nota';
+    detalle.textContent = nota;
+    fila.append(detalle);
+  }
+  return fila;
+}
+
+function mostrarGuardadas() {
+  elemento('contador-wifi').textContent = `(${guardadas.length}/${maxRedes})`;
+  elemento('sin-redes').hidden = guardadas.length > 0;
+  elemento('redes-guardadas').replaceChildren(...guardadas.map(red => {
+    const fila = crearFila(red.ssid, red.ssid === actual ? 'conectada' : '');
+    const borrar = document.createElement('button');
+    borrar.type = 'button';
+    borrar.className = 'peligro';
+    borrar.textContent = 'Borrar';
+    borrar.addEventListener('click', () => borrarRed(red.ssid));
+    fila.append(borrar);
+    return fila;
+  }));
+  actualizarAvisoLlena();
+}
+
+function mostrarCercanas() {
+  elemento('sin-cercanas').hidden = cercanas.length > 0 || !conexionWifi?.escaneado;
+  elemento('redes-cercanas').replaceChildren(...cercanas.map(red => {
+    const guardada = guardadas.some(g => g.ssid === red.ssid);
+    const nota = `${red.rssi} dBm · ${red.abierta ? 'abierta' : 'con clave'}${guardada ? ' · guardada' : ''}`;
+    const fila = crearFila(red.ssid, nota);
+    const elegir = document.createElement('button');
+    elegir.type = 'button';
+    elegir.className = 'secundario';
+    elegir.textContent = 'Elegir';
+    elegir.addEventListener('click', () => elegirRed(red));
+    fila.append(elegir);
+    return fila;
+  }));
+  controlesWifi();
+}
+
+function elegirRed(red) {
+  seleccion = red;
+  nombreWifi.value = red.ssid;
+  claveWifi.value = '';
+  claveWifi.disabled = red.abierta;
+  elemento('etiqueta-clave').firstChild.textContent = red.abierta
+    ? 'Red abierta: no necesita contraseña' : 'Contraseña de la red';
+  elemento('pregunta-wifi').textContent = `¿Permitir que el ESP32 se conecte a «${red.ssid}»?`;
+  formWifi.hidden = false;
+  actualizarAvisoLlena();
+  (red.abierta ? guardarWifi : claveWifi).focus();
+}
+
+function cerrarFormulario() {
+  seleccion = null;
+  formWifi.hidden = true;
+  claveWifi.value = '';
+  claveWifi.disabled = false;
+  actualizarAvisoLlena();
+}
+
+nombreWifi.addEventListener('input', actualizarAvisoLlena);
+elemento('cancelar-wifi').addEventListener('click', cerrarFormulario);
 
 async function leerPuertoWifi(conexion) {
   const decodificador = new TextDecoder();
@@ -303,12 +533,8 @@ async function leerPuertoWifi(conexion) {
       for (const cruda of lineas) {
         const solicitud = conexion.pendiente;
         if (!solicitud) continue;
-        const linea = cruda.replace(/\r$/, '');
-        if (linea === 'Wi-Fi: red guardada ' + solicitud.nombre) {
-          solicitud.resolver({ guardada: true });
-        } else if (/^Wi-Fi: (las cuatro ranuras|error al guardar)|^Formato Wi-Fi:/.test(linea)) {
-          solicitud.resolver({ mensaje: linea });
-        }
+        const resultado = solicitud.manejar(cruda.replace(/\r$/, ''));
+        if (resultado !== undefined) solicitud.resolver(resultado);
       }
     }
   } catch {
@@ -323,16 +549,105 @@ async function soltarPuertoWifi(mensaje) {
   if (!conexion) return;
   conexionWifi = null;
   usbOcupado = true;
+  guardadas = [];
+  cercanas = [];
+  actual = '';
   controlesWifi();
-  conexion.pendiente?.resolver({ mensaje: 'El USB se desconectó durante el envío.' });
+  conexion.pendiente?.resolver({ error: 'El USB se desconectó durante el envío.' });
   await conexion.lector.cancel().catch(() => {});
   await conexion.lectura;
   await conexion.escritura?.catch(() => {});
   await conexion.puerto.close().catch(() => {});
   usbOcupado = false;
+  cerrarFormulario();
   estadoWifi.textContent = mensaje;
   controlesWifi();
 }
+
+// Envía una línea al ESP32 y espera a que `manejar` reconozca la respuesta.
+async function enviarComando(texto, manejar, limite) {
+  const conexion = conexionWifi;
+  if (!conexion || conexion.pendiente) return { error: 'Espera a que termine la operación anterior.' };
+  let tiempo;
+  const respuesta = new Promise(resolver => {
+    conexion.pendiente = { manejar, resolver };
+    tiempo = setTimeout(() => resolver({ error: 'El ESP32 no respondió.' }), limite);
+  });
+  controlesWifi();
+  try {
+    conexion.escritura = (async () => {
+      const escritor = conexion.puerto.writable.getWriter();
+      try {
+        await escritor.write(codificador.encode(texto + '\n'));
+      } finally {
+        escritor.releaseLock();
+      }
+    })();
+    const [resultado] = await Promise.all([respuesta, conexion.escritura]);
+    return resultado;
+  } catch {
+    return { error: 'No se pudo enviar la orden por USB.' };
+  } finally {
+    clearTimeout(tiempo);
+    conexion.pendiente = null;
+    conexion.escritura = null;
+    controlesWifi();
+  }
+}
+
+async function refrescarGuardadas() {
+  const lista = [];
+  let conectada = '';
+  const resultado = await enviarComando('listar', linea => {
+    if (linea.startsWith('WIFI_ACTUAL\t')) conectada = linea.slice(12);
+    else if (linea.startsWith('WIFI_GUARDADA\t')) {
+      const [, ranura, ...resto] = linea.split('\t');
+      lista.push({ ranura: Number(ranura), ssid: resto.join('\t') });
+    } else if (linea === 'WIFI_LISTA_FIN') return { ok: true };
+  }, 5000);
+  if (resultado.error) {
+    estadoWifi.textContent = resultado.error;
+    return false;
+  }
+  guardadas = lista;
+  actual = conectada;
+  mostrarGuardadas();
+  mostrarCercanas();
+  return true;
+}
+
+async function borrarRed(ssid) {
+  estadoWifi.textContent = `Borrando «${ssid}»…`;
+  const resultado = await enviarComando('borrar ' + ssid, linea => {
+    if (linea === 'Wi-Fi: red borrada ' + ssid) return { ok: true };
+    if (linea.startsWith('Wi-Fi: red no encontrada') || linea.startsWith('Wi-Fi: error')) return { error: linea };
+  }, 7000);
+  if (resultado.error) {
+    estadoWifi.textContent = resultado.error;
+    return;
+  }
+  estadoWifi.textContent = `Red borrada: ${ssid}`;
+  await refrescarGuardadas();
+}
+
+buscarWifi.addEventListener('click', async () => {
+  estadoWifi.textContent = 'Buscando redes cercanas… (unos 5 segundos)';
+  const lista = [];
+  const resultado = await enviarComando('escanear', linea => {
+    if (linea.startsWith('WIFI_RED\t')) {
+      const [, rssi, abierta, ...resto] = linea.split('\t');
+      lista.push({ rssi: Number(rssi), abierta: abierta === '1', ssid: resto.join('\t') });
+    } else if (linea === 'WIFI_SCAN_FIN') return { ok: true };
+  }, 20000);
+  if (resultado.error) {
+    estadoWifi.textContent = resultado.error;
+    return;
+  }
+  conexionWifi.escaneado = true;
+  cercanas = lista;
+  estadoWifi.textContent = lista.length ? 'Elige la red a la que debe conectarse el ESP32.' : 'No se detectó ninguna red.';
+  mostrarCercanas();
+});
 
 conectarWifi.addEventListener('click', async () => {
   usbOcupado = true;
@@ -352,7 +667,12 @@ conectarWifi.addEventListener('click', async () => {
     void conexion.lectura.then(() => {
       if (conexionWifi === conexion) void soltarPuertoWifi('USB desconectado. Vuelve a conectar la placa.');
     });
-    estadoWifi.textContent = 'ESP32 conectado por USB.';
+    estadoWifi.textContent = 'ESP32 conectado por USB. Leyendo las redes guardadas…';
+    await espera(2500); // El ESP32 se reinicia al abrir el puerto.
+    usbOcupado = false;
+    if (conexionWifi === conexion && await refrescarGuardadas()) {
+      estadoWifi.textContent = 'Listo. Pulsa Buscar redes para ver las redes cercanas.';
+    }
   } catch (error) {
     if (puerto?.readable) await puerto.close().catch(() => {});
     estadoWifi.textContent = error.name === 'NotFoundError'
@@ -366,58 +686,41 @@ conectarWifi.addEventListener('click', async () => {
 
 formWifi.addEventListener('submit', async evento => {
   evento.preventDefault();
-  const conexion = conexionWifi;
-  if (!conexion || conexion.pendiente) return;
   const nombre = nombreWifi.value;
-  const clave = claveWifi.value;
-  const caracteresInvalidos = /[\0\r\n\t]/;
+  const clave = seleccion?.abierta ? '' : claveWifi.value;
+  if (!conexionWifi || conexionWifi.pendiente) return;
   if (!nombre || codificador.encode(nombre).length > 32 ||
       codificador.encode(clave).length > 64 ||
       caracteresInvalidos.test(nombre) || caracteresInvalidos.test(clave)) {
     estadoWifi.textContent = 'El SSID admite hasta 32 bytes y la clave hasta 64. Usa una sola línea por campo.';
     return;
   }
-
-  let tiempo;
-  const confirmacion = new Promise(resolver => {
-    conexion.pendiente = { nombre, resolver };
-    tiempo = setTimeout(() => resolver({ mensaje: 'El ESP32 no confirmó el guardado.' }), 7000);
-  });
-  controlesWifi();
+  if (llena()) {
+    estadoWifi.textContent = 'Las 4 ranuras están ocupadas. Borra una red guardada primero.';
+    return;
+  }
   estadoWifi.textContent = 'Guardando la red en el ESP32…';
-  try {
-    conexion.escritura = (async () => {
-      const escritor = conexion.puerto.writable.getWriter();
-      try {
-        await escritor.write(codificador.encode('wifi ' + nombre + '\t' + clave + '\n'));
-      } finally {
-        escritor.releaseLock();
-      }
-    })();
-    const [respuesta] = await Promise.all([confirmacion, conexion.escritura]);
-    if (respuesta.guardada) {
-      redesWifi = [nombre, ...redesWifi.filter(red => red !== nombre)].slice(0, 4);
-      try {
-        localStorage.setItem(claveHistorialWifi, JSON.stringify(redesWifi));
-      } catch {
-        // El historial sigue disponible mientras la página esté abierta.
-      }
-      mostrarRedesWifi();
-    }
-    estadoWifi.textContent = respuesta.guardada ? 'Red guardada en el ESP32: ' + nombre : respuesta.mensaje;
-  } catch {
-    estadoWifi.textContent = 'No se pudo enviar la configuración por USB.';
-  } finally {
-    clearTimeout(tiempo);
-    conexion.pendiente = null;
-    conexion.escritura = null;
-    claveWifi.value = '';
-    controlesWifi();
+  const resultado = await enviarComando('wifi ' + nombre + '\t' + clave, linea => {
+    if (linea === 'Wi-Fi: red guardada ' + nombre) return { ok: true };
+    if (/^Wi-Fi: (las cuatro ranuras|error al guardar)|^Formato Wi-Fi:/.test(linea)) return { error: linea };
+  }, 7000);
+  claveWifi.value = '';
+  if (resultado.error) {
+    estadoWifi.textContent = resultado.error;
+    await refrescarGuardadas();
+    return;
+  }
+  cerrarFormulario();
+  estadoWifi.textContent = `Red guardada: ${nombre}. El ESP32 se está conectando…`;
+  await espera(3000);
+  if (await refrescarGuardadas()) {
+    estadoWifi.textContent = actual === nombre
+      ? `El ESP32 está conectado a ${nombre}.`
+      : `Red guardada: ${nombre}. Aún no se conecta; revisa la clave y que sea de 2,4 GHz.`;
   }
 });
 
 elemento('abrir-wifi').addEventListener('click', () => {
-  mostrarRedesWifi();
   estadoWifi.textContent = usuarioUsb
     ? 'Pulsa Conectar por USB y selecciona el puerto del ESP32.'
     : 'Abre la página en Chrome de escritorio para usar el puerto USB.';
