@@ -126,3 +126,32 @@ Archivos
   index.html, Dockerfile   Panel web que sirve Render (raíz del repositorio).
   firmware/                Código del ESP32. No lo usa Render: el Dockerfile
                            solo copia index.html.
+
+8. Calibración de la radiación en campo
+
+  La radiación se calcula como  W/m2 = 1000 x (I - I_cero) / I_sc,  con
+  I = V / 1,5 ohm. I_sc es la corriente del panel a 1000 W/m2 y se mide.
+  Los valores se guardan en la memoria del ESP32 (no hace falta recompilar).
+    cero             Con el panel TAPADO por completo: guarda I_cero.
+    calibrar 674     Con el panel al SOL, orientado al sol: guarda I_sc usando
+                     674 W/m2 como referencia (piranómetro o celda calibrada).
+    calibracion      Muestra los valores en uso.
+  Repite calibrar a distintas horas con una referencia real. Un dato modelado
+  (como Open-Meteo) sirve para una primera aproximación, no para precisión.
+  Referencia: con I_sc = 0,194 A, a 674 W/m2 se esperan unos 196 mV en el shunt.
+
+9. Estimación de radiación con el luxómetro (respaldo) y diagnóstico
+
+  Si el panel marca casi 0 pero el BH1750 indica más de ~3 300 lux, el firmware
+  estima  W/m2 = lux / (K + ajuste_humedad)  con K = 110 lm/W de fábrica
+  (eficacia luminosa global típica: 105-128 lm/W). El ajuste usa el punto de
+  rocío del DHT22 (agua precipitable, modelo de Perez) y vale pocos %.
+  Esas lecturas llevan ESTIMADO_POR_LUX en el estado y la web las rotula.
+  La temperatura sola no mejora la conversión: el error (~±20 %) viene del
+  sensor y del tipo de cielo. Para reducirlo, calibra K en el lugar:
+    kluz 650     Sensor al aire libre apuntando al cielo, con 650 W/m2 de
+                 referencia real (piranómetro o celda calibrada): guarda K.
+    diag         Lee los 4 canales del ADS1115, reintenta la SD a 1 MHz y
+                 muestra lux y DHT22. Útil para diagnosticar sin multímetro.
+  El BH1750 cambia solo de rango (MTreg 69 a 31) con luz muy fuerte para no
+  saturar al sol (hasta ~120 000 lx).

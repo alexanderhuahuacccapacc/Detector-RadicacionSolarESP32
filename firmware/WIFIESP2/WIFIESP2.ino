@@ -51,8 +51,22 @@ struct LecturaNube {
 // y 669.5 W/m2 de referencia Open-Meteo -> 0.13 * 1000 / 669.5 = 0.194 A.
 // Mejorar con mas mediciones a distintas horas y promediar.
 const bool CALIBRADO = true;
-const float ISC_EQ_1000_A = 0.194f;
-const float I_CERO_A = 0.0f;
+// Valores de fabrica. Se pueden recalibrar por USB con los comandos
+// "cero" y "calibrar W/m2"; lo guardado en la memoria del ESP32 tiene prioridad.
+const float ISC_EQ_1000_DEF_A = 0.194f;
+const float I_CERO_DEF_A = 0.0f;
+float iscEq1000A = ISC_EQ_1000_DEF_A;
+float iCeroA = I_CERO_DEF_A;
+// ---- Respaldo: radiacion estimada con el luxometro (BH1750) + DHT22 ----
+// Eficacia luminosa global tipica: 105-128 lm/W, ~110 lm/W para cualquier cielo
+// (Muneer y Angus). W/m2 = lux / K. El punto de rocio (de T y HR del DHT22) da el
+// agua precipitable (Perez: W = exp(0.07*Td - 0.075) cm) y ajusta K unos pocos %.
+// Es una ESTIMACION (+-20% por el sensor y el cielo). Se usa solo si el panel marca
+// casi 0 mientras el luxometro indica luz, y queda anotada como ESTIMADO_POR_LUX.
+const bool USAR_ESTIMADO_LUX = true;
+const float K_LUZ_LM_W = 110.0f;
+// K en uso: 110 lm/W de fabrica, o la calibrada en el lugar con el comando "kluz W/m2".
+float kLuz = K_LUZ_LM_W;
 // Valor PROVISIONAL (solo se usa si CALIBRADO = false).
 const float ISC_PROVISIONAL_A = 0.30f;
 
@@ -435,6 +449,9 @@ void encolarNube(const String &fecha, unsigned long tiempoMs, float tension, flo
 //   borrar RED           libera la ranura de esa red
 //   escanear             lista las redes cercanas (WIFI_RED ...)
 //   listar               lista las redes guardadas (WIFI_GUARDADA ...)
+//   cero                 panel tapado: guarda el desfase de reposo (I_cero)
+//   calibrar W/m2        panel al sol: guarda I_sc con esa referencia
+//   calibracion          muestra los valores de calibracion en uso
 //   nube CLAVE
 void revisarComandoSerial() {
   if (!Serial.available()) return;
@@ -455,6 +472,26 @@ void revisarComandoSerial() {
   }
   if (cmd == "listar") {
     listarWiFi();
+    return;
+  }
+  if (cmd.startsWith("kluz ")) {
+    calibrarKLuz(cmd.substring(5).toFloat());
+    return;
+  }
+  if (cmd == "diag") {
+    diagnostico();
+    return;
+  }
+  if (cmd == "calibracion") {
+    mostrarCalibracion();
+    return;
+  }
+  if (cmd == "cero") {
+    calibrarCero();
+    return;
+  }
+  if (cmd.startsWith("calibrar ")) {
+    calibrarRadiacion(cmd.substring(9).toFloat());
     return;
   }
   if (cmd.startsWith("nube ")) {
@@ -526,10 +563,10 @@ bool leerPanel(float &volts, float &corriente, float &potencia, float &radiacion
   if (ads.computeVolts(rawMax) >= VOLT_MAX) estado += "|CERCA_LIMITE_ADC";
   if (potenciaAlta) estado += "|POTENCIA_SHUNT_ALTA";
 
-  bool calibracionValida = CALIBRADO && isfinite(ISC_EQ_1000_A) &&
-                           ISC_EQ_1000_A > 0 && isfinite(I_CERO_A);
-  float isc1000 = calibracionValida ? ISC_EQ_1000_A : ISC_PROVISIONAL_A;
-  float cero = calibracionValida ? I_CERO_A : 0.0f;
+  bool calibracionValida = CALIBRADO && isfinite(iscEq1000A) &&
+                           iscEq1000A > 0 && isfinite(iCeroA);
+  float isc1000 = calibracionValida ? iscEq1000A : ISC_PROVISIONAL_A;
+  float cero = calibracionValida ? iCeroA : 0.0f;
   if (!calibracionValida) estado += "|PROVISIONAL";
   if (volts >= -RUIDO_V && !potenciaAlta) {
     float corregida = corriente - cero;
@@ -543,7 +580,113 @@ bool leerPanel(float &volts, float &corriente, float &potencia, float &radiacion
   return true;
 }
 
+// ---- Calibracion en campo (queda guardada en la memoria del ESP32) ----
+// Promedio de 10 mediciones de corriente. Falla si el ADS no responde o satura.
+bool promedioCorriente(float &media) {
+  float suma = 0;
+  int validas = 0;
+  for (int i = 0; i < 10; i++) {
+    float v, c, p, g, raw;
+    int16_t rawMax;
+    String estado;
+    if (leerPanel(v, c, p, g, raw, rawMax, estado) && isfinite(c)) {
+      suma += c;
+      validas++;
+    }
+    delay(100);
+  }
+  if (validas < 8) return false;
+  media = suma / validas;
+  return true;
+}
+
+void cargarCalibracion() {
+  Preferences ajustes;
+  if (!ajustes.begin("registrador", true)) return;
+  const float k = ajustes.getFloat("isc1000", ISC_EQ_1000_DEF_A);
+  const float cero = ajustes.getFloat("i0", I_CERO_DEF_A);
+  if (isfinite(k) && k > 0.01f && k < 5.0f) iscEq1000A = k;
+  if (isfinite(cero) && fabsf(cero) < 0.05f) iCeroA = cero;
+  const float kl = ajustes.getFloat("kluz", K_LUZ_LM_W);
+  if (isfinite(kl) && kl >= 60.0f && kl <= 200.0f) kLuz = kl;
+}
+
+void mostrarCalibracion() {
+  Serial.printf("Calibracion: I_sc a 1000 W/m2 = %.4f A | I_cero = %.5f A | K lux = %.1f lm/W\n",
+                iscEq1000A, iCeroA, kLuz);
+}
+
+bool guardarCalibracion(const char* clave, float valor) {
+  Preferences ajustes;
+  if (!ajustes.begin("registrador") || ajustes.putFloat(clave, valor) != sizeof(float)) {
+    Serial.println("Calibracion: error al guardar.");
+    return false;
+  }
+  return true;
+}
+
+// Panel TAPADO por completo: mide la corriente de reposo (desfase del ADC).
+void calibrarCero() {
+  float media;
+  if (!promedioCorriente(media)) {
+    Serial.println("Calibracion: lectura del ADS no valida.");
+    return;
+  }
+  if (fabsf(media) > 0.01f) {
+    Serial.printf("Calibracion: hay %.1f mA; tapa el panel por completo y repite.\n", media * 1000);
+    return;
+  }
+  if (!guardarCalibracion("i0", media)) return;
+  iCeroA = media;
+  mostrarCalibracion();
+}
+
+// Panel al SOL: recibe los W/m2 reales de una referencia y calcula I_sc a 1000 W/m2.
+void calibrarRadiacion(float referencia) {
+  if (!(referencia >= 50.0f && referencia <= 1500.0f)) {
+    Serial.println("Formato: calibrar W/m2   (referencia entre 50 y 1500)");
+    return;
+  }
+  float media;
+  if (!promedioCorriente(media)) {
+    Serial.println("Calibracion: lectura del ADS no valida o saturada.");
+    return;
+  }
+  const float neta = media - iCeroA;
+  if (neta < 0.005f) {
+    Serial.printf("Calibracion: corriente muy baja (%.2f mA). Apunta el panel al sol.\n", media * 1000);
+    return;
+  }
+  const float k = neta * 1000.0f / referencia;
+  if (k < 0.01f || k > 5.0f) {
+    Serial.println("Calibracion: resultado fuera de rango; revisa la referencia.");
+    return;
+  }
+  if (!guardarCalibracion("isc1000", k)) return;
+  iscEq1000A = k;
+  Serial.printf("Calibracion guardada con %.1f W/m2 de referencia y %.2f mA medidos.\n",
+                referencia, media * 1000);
+  mostrarCalibracion();
+}
+
+// Ajuste pequeno (unos pocos %) por vapor de agua, con el punto de rocio del DHT22.
+float ajusteHumedad(float temp, float hum) {
+  if (!isfinite(temp) || !isfinite(hum) || hum <= 1.0f) return 0.0f;
+  const float g = logf(hum / 100.0f) + 17.62f * temp / (243.12f + temp);  // Magnus
+  const float rocio = 243.12f * g / (17.62f - g);
+  const float aguaCm = expf(0.07f * rocio - 0.075f);                      // agua precipitable
+  return constrain(aguaCm - 2.0f, -3.0f, 4.0f);
+}
+
+// Convierte lux en W/m2 con la eficacia luminosa K y el ajuste por humedad.
+float estimarRadiacionLux(float lux, float temp, float hum) {
+  return lux / (kLuz + ajusteHumedad(temp, hum));
+}
+
+// Autorango: sensibilidad normal (MTreg 69) y, con luz muy fuerte, rango ampliado
+// (MTreg 31, hasta ~120 000 lx) para no saturar al sol.
 float leerLux(String &estado) {
+  static uint8_t mtreg = 69;
   estado = "SIN_BH1750";
   if (!luxOk) return NAN;
   float lux = luxometro.readLightLevel();
@@ -551,12 +694,88 @@ float leerLux(String &estado) {
     estado = "ERROR_BH1750";
     return NAN;
   }
-  if (lux >= 54600.0f) {
+  if (mtreg == 69 && lux >= 40000.0f) {
+    if (luxometro.setMTreg(31)) mtreg = 31;
+    if (lux >= 54600.0f) {
+      estado = "CAMBIO_RANGO_BH1750";  // Esta lectura pudo saturarse; la siguiente ya es valida.
+      return NAN;
+    }
+  } else if (mtreg == 31 && lux < 15000.0f) {
+    if (luxometro.setMTreg(69)) mtreg = 69;
+  }
+  if (lux >= 120000.0f) {
     estado = "POSIBLE_SATURACION_BH1750";
     return NAN;
   }
   estado = "OK";
   return lux;
+}
+
+// Calibra K con una referencia real de radiacion (piranometro o celda calibrada).
+// Con el sensor al aire libre y apuntando al cielo: "kluz 650" -> K = lux / 650.
+void calibrarKLuz(float referencia) {
+  if (!(referencia >= 50.0f && referencia <= 1500.0f)) {
+    Serial.println("Formato: kluz W/m2   (referencia entre 50 y 1500)");
+    return;
+  }
+  float suma = 0;
+  int validas = 0;
+  String estado;
+  for (int i = 0; i < 10; i++) {
+    const float lux = leerLux(estado);
+    if (isfinite(lux)) {
+      suma += lux;
+      validas++;
+    }
+    delay(250);
+  }
+  if (validas < 8) {
+    Serial.println("Calibracion lux: lectura no valida (" + estado + ").");
+    return;
+  }
+  const float lux = suma / validas;
+  if (lux < 3000.0f) {
+    Serial.printf("Calibracion lux: solo %.0f lux. Saca el sensor al aire libre, apuntando al cielo.\n", lux);
+    return;
+  }
+  const float k = lux / referencia - ajusteHumedad(dht.readTemperature(), dht.readHumidity());
+  if (!(k >= 60.0f && k <= 200.0f)) {
+    Serial.printf("Calibracion lux: K=%.1f fuera de rango (60-200); revisa la referencia.\n", k);
+    return;
+  }
+  if (!guardarCalibracion("kluz", k)) return;
+  kLuz = k;
+  Serial.printf("Calibracion lux guardada: %.0f lux con %.0f W/m2 -> K = %.1f lm/W\n", lux, referencia, k);
+}
+
+// Diagnostico sin multimetro: canales del ADS, SD y sensores.
+void diagnostico() {
+  Serial.println("DIAG --------------------------------");
+  if (!presente(0x48)) {
+    Serial.println("DIAG ADS1115: no responde en 0x48.");
+  } else {
+    for (int canal = 0; canal < 4; canal++) {
+      const int16_t raw = ads.readADC_SingleEnded(canal);
+      Serial.printf("DIAG ADS A%d = %.3f mV (raw %d)%s\n", canal, ads.computeVolts(raw) * 1000.0f, raw,
+                    canal == 0 ? "  <- entrada del panel/shunt" : "");
+    }
+  }
+  SD.end();
+  sdSPI.end();
+  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  sdOk = SD.begin(SD_CS, sdSPI, 1000000);  // 1 MHz: mas tolerante a cables largos
+  if (sdOk) {
+    const char* tipos[] = {"ninguna", "MMC", "SD", "SDHC"};
+    const uint8_t t = SD.cardType();
+    Serial.printf("DIAG SD: OK, tarjeta %s, %llu MB\n", t < 4 ? tipos[t] : "?", SD.cardSize() / (1024 * 1024));
+  } else {
+    Serial.println("DIAG SD: sin respuesta. Revisa capuchon en JP1, puentes W5/W6, orden de pines del modulo y que la tarjeta sea FAT32.");
+  }
+  String estadoLux;
+  const float lux = leerLux(estadoLux);
+  Serial.println("DIAG Lux: " + dato(lux, 1, "lux") + " | " + estadoLux);
+  Serial.println("DIAG DHT22: " + dato(dht.readTemperature(), 1, "C") + " | " + dato(dht.readHumidity(), 1, "%"));
+  Serial.println("DIAG fin");
 }
 
 bool guardarSD(const String &linea) {
@@ -580,6 +799,7 @@ void setup() {
   Wire.setTimeOut(50);
   delay(1500);
   escanearI2C();
+  cargarCalibracion();
   iniciarSensores();
   iniciarSD();
   iniciarRed();
@@ -628,6 +848,15 @@ void loop() {
   if (!isfinite(t) || t < -40 || t > 80) t = NAN;
   if (!isfinite(h) || h < 0 || h > 100) h = NAN;
   String estadoDHT = isfinite(t) && isfinite(h) ? "OK" : "ERROR_DHT";
+
+  // Respaldo: si el panel marca casi 0 pero el luxometro indica luz, estima con lux + DHT22.
+  if (USAR_ESTIMADO_LUX && isfinite(lux)) {
+    const float estimada = estimarRadiacionLux(lux, t, h);
+    if (estimada > 30.0f && (!isfinite(radiacion) || radiacion < 0.2f * estimada)) {
+      radiacion = estimada;
+      estadoPanel += "|ESTIMADO_POR_LUX";
+    }
+  }
 
   String linea = fecha + "," + String(inicio) + "," + num(rawPromedio, 2) + "," +
     (isfinite(rawPromedio) ? String(rawMax) : String("")) + "," +

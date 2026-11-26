@@ -73,7 +73,7 @@
   <div id="contenido" hidden>
     <section class="panel" aria-label="Última lectura del ESP32">
       <output id="radiacion" aria-live="polite">—</output>
-      <span>W/m² · Calibración preliminar</span>
+      <span id="nota-radiacion">W/m² · Calibración preliminar</span>
       <p id="estado" role="status">Esperando la primera lectura del ESP32.</p>
       <dl>
         <div><dt>Tensión en A0</dt><dd id="tension">—</dd></div>
@@ -185,6 +185,8 @@ function numero(valor, decimales, unidad = '') {
 
 function mostrar({ lectura, historial }) {
   elemento('radiacion').textContent = numero(lectura?.irradiancia_wm2, 1);
+  elemento('nota-radiacion').textContent = lectura?.estado_panel?.includes('ESTIMADO_POR_LUX')
+    ? 'W/m² · Estimado con el luxómetro (±20 %)' : 'W/m² · Calibración preliminar';
   elemento('tension').textContent = numero(lectura?.tension_mv, 3, ' mV');
   elemento('lux').textContent = lectura?.estado_lux === 'SIN_BH1750'
     ? 'Sensor sin detectar' : numero(lectura?.lux, 1, ' lx');
